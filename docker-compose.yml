@@ -1,6 +1,22 @@
 version: "3.9"
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: inforganizer_postgres
+    environment:
+      POSTGRES_USER:     inforganizer
+      POSTGRES_PASSWORD: devpassword
+      POSTGRES_DB:       inforganizer
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inforganizer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   app:
     build:
       context: .
@@ -12,9 +28,11 @@ services:
     environment:
       - PORT=3000
       - NODE_ENV=development
-      - DB_PATH=/data/inforganizer.db
-    volumes:
-      - inforganizer_data:/data
+      - DATABASE_URL=postgresql://inforganizer:devpassword@postgres:5432/inforganizer
+      - JWT_SECRET=dev-jwt-secret-change-in-production
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
@@ -23,5 +41,5 @@ services:
       retries: 3
 
 volumes:
-  inforganizer_data:
+  postgres_data:
     driver: local

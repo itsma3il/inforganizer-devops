@@ -9,8 +9,10 @@
 #   3. deploy      — SSH into EC2 master, pull new image & rollout  (main only)
 #
 # Required secrets (Settings → Secrets and variables → Actions):
-#   AWS_MASTER_IP   — Public IP of the EC2 master node (terraform output)
-#   SSH_PRIVATE_KEY — PEM content of the EC2 key pair (~/.ssh/<key>.pem)
+#   AWS_MASTER_IP     — Public IP of the EC2 master node (terraform output)
+#   SSH_PRIVATE_KEY   — PEM content of the EC2 key pair (~/.ssh/<key>.pem)
+#   POSTGRES_PASSWORD — Postgres password (used when re-applying the K8s secret)
+#   JWT_SECRET        — JWT signing secret (used when re-applying the K8s secret)
 #
 # GITHUB_TOKEN is provided automatically — no action needed.
 ###############################################################################
@@ -32,6 +34,24 @@ jobs:
   test:
     name: Install & Test
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER:     postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB:       inforganizer_test
+        ports:
+          - 5432:5432
+        options: >
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/inforganizer_test
 
     steps:
       - name: Checkout repository

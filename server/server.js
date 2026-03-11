@@ -1,10 +1,12 @@
 'use strict';
 
-const path     = require('path');
-const express  = require('express');
-const cors     = require('cors');
-const bcrypt   = require('bcryptjs');
-const db       = require('./database');
+require('dotenv').config();
+
+const path    = require('path');
+const express = require('express');
+const cors    = require('cors');
+const bcrypt  = require('bcryptjs');
+const { pool, init } = require('./database');
 const { signToken, authMiddleware } = require('./auth');
 
 const app  = express();
@@ -18,9 +20,9 @@ app.use(express.static(path.join(__dirname, '..', 'client')));
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function now() { return new Date().toISOString(); }
 
-// Verify a note belongs to the requesting user
-function getOwnedNote(noteId, userId) {
-    const note = db.prepare('SELECT * FROM info_notes WHERE id = ?').get(noteId);
+async function getOwnedNote(noteId, userId) {
+    const { rows } = await pool.query('SELECT * FROM info_notes WHERE id = $1', [noteId]);
+    const note = rows[0];
     if (!note || note.user_id !== userId) return null;
     return note;
 }
@@ -30,198 +32,348 @@ app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 app.post('/api/auth/signup', async (req, res) => {
-    const { email, password } = req.body || {};
-    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
-    if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    try {
+        const { email, password } = req.body || {};
+        if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+        if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
 
-    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email.toLowerCase());
-    if (existing) return res.status(409).json({ error: 'Email already registered' });
+        const { rows: existing } = await pool.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
+        if (existing.length) return res.status(409).json({ error: 'Email already registered' });
 
-    const hash = await bcrypt.hash(password, 12);
-    const stmt = db.prepare('INSERT INTO users (email, password_hash, created_at) VALUES (?,?,?)');
-    const result = stmt.run(email.toLowerCase(), hash, now());
-    const userId = result.lastInsertRowid;
+        const hash = await bcrypt.hash(password, 12);
+        const { rows: userRows } = await pool.query(
+            'INSERT INTO users (email, password_hash, created_at) VALUES ($1,$2,$3) RETURNING id',
+            [email.toLowerCase(), hash, now()]
+        );
+        const userId = userRows[0].id;
 
-    // Create a default note for the new user
-    const noteResult = db.prepare('INSERT INTO info_notes (user_id, name, created_at, updated_at) VALUES (?,?,?,?)')
-        .run(userId, 'My Application', now(), now());
+        const { rows: noteRows } = await pool.query(
+            'INSERT INTO info_notes (user_id, name, created_at, updated_at) VALUES ($1,$2,$3,$4) RETURNING id',
+            [userId, 'My Application', now(), now()]
+        );
 
-    const token = signToken(userId);
-    res.status(201).json({ token, user: { id: userId, email: email.toLowerCase() }, defaultNoteId: noteResult.lastInsertRowid });
+        const token = signToken(userId);
+        res.status(201).json({ token, user: { id: userId, email: email.toLowerCase() }, defaultNoteId: noteRows[0].id });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
 app.post('/api/auth/login', async (req, res) => {
-    const { email, password } = req.body || {};
-    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    try {
+        const { email, password } = req.body || {};
+        if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
 
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email.toLowerCase());
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+        const { rows } = await pool.query('SELECT * FROM users WHERE email = $1', [email.toLowerCase()]);
+        const user = rows[0];
+        if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
+        const valid = await bcrypt.compare(password, user.password_hash);
+        if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const token = signToken(user.id);
-    res.json({ token, user: { id: user.id, email: user.email } });
+        const token = signToken(user.id);
+        res.json({ token, user: { id: user.id, email: user.email } });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-app.get('/api/auth/me', authMiddleware, (req, res) => {
-    const user = db.prepare('SELECT id, email, created_at FROM users WHERE id = ?').get(req.userId);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    res.json(user);
+app.get('/api/auth/me', authMiddleware, async (req, res) => {
+    try {
+        const { rows } = await pool.query('SELECT id, email, created_at FROM users WHERE id = $1', [req.userId]);
+        const user = rows[0];
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        res.json(user);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
 // ─── Notes (CRUD) ─────────────────────────────────────────────────────────────
-app.get('/api/notes', authMiddleware, (req, res) => {
-    const notes = db.prepare('SELECT * FROM info_notes WHERE user_id = ? ORDER BY created_at ASC').all(req.userId);
-    res.json(notes);
+app.get('/api/notes', authMiddleware, async (req, res) => {
+    try {
+        const { rows } = await pool.query(
+            'SELECT * FROM info_notes WHERE user_id = $1 ORDER BY created_at ASC', [req.userId]
+        );
+        res.json(rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-app.post('/api/notes', authMiddleware, (req, res) => {
-    const { name } = req.body || {};
-    if (!name || !name.trim()) return res.status(400).json({ error: 'Note name required' });
-    const result = db.prepare('INSERT INTO info_notes (user_id, name, created_at, updated_at) VALUES (?,?,?,?)')
-        .run(req.userId, name.trim(), now(), now());
-    const note = db.prepare('SELECT * FROM info_notes WHERE id = ?').get(result.lastInsertRowid);
-    res.status(201).json(note);
+app.post('/api/notes', authMiddleware, async (req, res) => {
+    try {
+        const { name } = req.body || {};
+        if (!name || !name.trim()) return res.status(400).json({ error: 'Note name required' });
+        const { rows } = await pool.query(
+            'INSERT INTO info_notes (user_id, name, created_at, updated_at) VALUES ($1,$2,$3,$4) RETURNING *',
+            [req.userId, name.trim(), now(), now()]
+        );
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-app.put('/api/notes/:id', authMiddleware, (req, res) => {
-    const note = getOwnedNote(Number(req.params.id), req.userId);
-    if (!note) return res.status(404).json({ error: 'Note not found' });
-    const { name } = req.body || {};
-    if (!name || !name.trim()) return res.status(400).json({ error: 'Note name required' });
-    db.prepare('UPDATE info_notes SET name = ?, updated_at = ? WHERE id = ?').run(name.trim(), now(), note.id);
-    res.json({ ...note, name: name.trim() });
+app.put('/api/notes/:id', authMiddleware, async (req, res) => {
+    try {
+        const note = await getOwnedNote(Number(req.params.id), req.userId);
+        if (!note) return res.status(404).json({ error: 'Note not found' });
+        const { name } = req.body || {};
+        if (!name || !name.trim()) return res.status(400).json({ error: 'Note name required' });
+        await pool.query('UPDATE info_notes SET name = $1, updated_at = $2 WHERE id = $3', [name.trim(), now(), note.id]);
+        res.json({ ...note, name: name.trim() });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-app.delete('/api/notes/:id', authMiddleware, (req, res) => {
-    const note = getOwnedNote(Number(req.params.id), req.userId);
-    if (!note) return res.status(404).json({ error: 'Note not found' });
-    // Prevent deleting the last note
-    const count = db.prepare('SELECT COUNT(*) as n FROM info_notes WHERE user_id = ?').get(req.userId).n;
-    if (count <= 1) return res.status(400).json({ error: 'Cannot delete your only note' });
-    db.prepare('DELETE FROM info_notes WHERE id = ?').run(note.id);
-    res.json({ success: true });
+app.delete('/api/notes/:id', authMiddleware, async (req, res) => {
+    try {
+        const note = await getOwnedNote(Number(req.params.id), req.userId);
+        if (!note) return res.status(404).json({ error: 'Note not found' });
+        const { rows } = await pool.query('SELECT COUNT(*) AS n FROM info_notes WHERE user_id = $1', [req.userId]);
+        if (parseInt(rows[0].n, 10) <= 1) return res.status(400).json({ error: 'Cannot delete your only note' });
+        await pool.query('DELETE FROM info_notes WHERE id = $1', [note.id]);
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
 // ─── Custom Fields ────────────────────────────────────────────────────────────
-app.get('/api/notes/:id/fields', authMiddleware, (req, res) => {
-    const note = getOwnedNote(Number(req.params.id), req.userId);
-    if (!note) return res.status(404).json({ error: 'Note not found' });
-    const fields = db.prepare('SELECT * FROM custom_fields WHERE note_id = ? ORDER BY section, position ASC').all(note.id);
-    res.json(fields);
+app.get('/api/notes/:id/fields', authMiddleware, async (req, res) => {
+    try {
+        const note = await getOwnedNote(Number(req.params.id), req.userId);
+        if (!note) return res.status(404).json({ error: 'Note not found' });
+        const { rows } = await pool.query(
+            'SELECT * FROM custom_fields WHERE note_id = $1 ORDER BY section, position ASC', [note.id]
+        );
+        res.json(rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-app.post('/api/notes/:id/fields', authMiddleware, (req, res) => {
-    const note = getOwnedNote(Number(req.params.id), req.userId);
-    if (!note) return res.status(404).json({ error: 'Note not found' });
-    const { label, section } = req.body || {};
-    if (!label || !label.trim()) return res.status(400).json({ error: 'Field label required' });
-    const fieldKey = `cf_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const maxPos = db.prepare('SELECT MAX(position) as m FROM custom_fields WHERE note_id = ? AND section = ?').get(note.id, section || 'custom');
-    const position = (maxPos.m ?? -1) + 1;
-    const result = db.prepare('INSERT INTO custom_fields (note_id, field_key, label, section, position) VALUES (?,?,?,?,?)')
-        .run(note.id, fieldKey, label.trim(), section || 'custom', position);
-    const field = db.prepare('SELECT * FROM custom_fields WHERE id = ?').get(result.lastInsertRowid);
-    res.status(201).json(field);
+app.post('/api/notes/:id/fields', authMiddleware, async (req, res) => {
+    try {
+        const note = await getOwnedNote(Number(req.params.id), req.userId);
+        if (!note) return res.status(404).json({ error: 'Note not found' });
+        const { label, section } = req.body || {};
+        if (!label || !label.trim()) return res.status(400).json({ error: 'Field label required' });
+        const fieldKey = `cf_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const { rows: maxRows } = await pool.query(
+            'SELECT MAX(position) AS m FROM custom_fields WHERE note_id = $1 AND section = $2',
+            [note.id, section || 'custom']
+        );
+        const position = (maxRows[0].m ?? -1) + 1;
+        const { rows } = await pool.query(
+            'INSERT INTO custom_fields (note_id, field_key, label, section, position) VALUES ($1,$2,$3,$4,$5) RETURNING *',
+            [note.id, fieldKey, label.trim(), section || 'custom', position]
+        );
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-app.put('/api/notes/:id/fields/:fieldId', authMiddleware, (req, res) => {
-    const note = getOwnedNote(Number(req.params.id), req.userId);
-    if (!note) return res.status(404).json({ error: 'Note not found' });
-    const field = db.prepare('SELECT * FROM custom_fields WHERE id = ? AND note_id = ?').get(Number(req.params.fieldId), note.id);
-    if (!field) return res.status(404).json({ error: 'Field not found' });
-    const { label } = req.body || {};
-    if (!label || !label.trim()) return res.status(400).json({ error: 'Field label required' });
-    db.prepare('UPDATE custom_fields SET label = ? WHERE id = ?').run(label.trim(), field.id);
-    res.json({ ...field, label: label.trim() });
+app.put('/api/notes/:id/fields/:fieldId', authMiddleware, async (req, res) => {
+    try {
+        const note = await getOwnedNote(Number(req.params.id), req.userId);
+        if (!note) return res.status(404).json({ error: 'Note not found' });
+        const { rows: fieldRows } = await pool.query(
+            'SELECT * FROM custom_fields WHERE id = $1 AND note_id = $2',
+            [Number(req.params.fieldId), note.id]
+        );
+        const field = fieldRows[0];
+        if (!field) return res.status(404).json({ error: 'Field not found' });
+        const { label } = req.body || {};
+        if (!label || !label.trim()) return res.status(400).json({ error: 'Field label required' });
+        await pool.query('UPDATE custom_fields SET label = $1 WHERE id = $2', [label.trim(), field.id]);
+        res.json({ ...field, label: label.trim() });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-app.delete('/api/notes/:id/fields/:fieldId', authMiddleware, (req, res) => {
-    const note = getOwnedNote(Number(req.params.id), req.userId);
-    if (!note) return res.status(404).json({ error: 'Note not found' });
-    const field = db.prepare('SELECT * FROM custom_fields WHERE id = ? AND note_id = ?').get(Number(req.params.fieldId), note.id);
-    if (!field) return res.status(404).json({ error: 'Field not found' });
-    // Also delete the stored value for this field
-    db.prepare('DELETE FROM note_field_values WHERE note_id = ? AND field_key = ?').run(note.id, field.field_key);
-    db.prepare('DELETE FROM custom_fields WHERE id = ?').run(field.id);
-    res.json({ success: true });
+app.delete('/api/notes/:id/fields/:fieldId', authMiddleware, async (req, res) => {
+    try {
+        const note = await getOwnedNote(Number(req.params.id), req.userId);
+        if (!note) return res.status(404).json({ error: 'Note not found' });
+        const { rows: fieldRows } = await pool.query(
+            'SELECT * FROM custom_fields WHERE id = $1 AND note_id = $2',
+            [Number(req.params.fieldId), note.id]
+        );
+        const field = fieldRows[0];
+        if (!field) return res.status(404).json({ error: 'Field not found' });
+        await pool.query('DELETE FROM note_field_values WHERE note_id = $1 AND field_key = $2', [note.id, field.field_key]);
+        await pool.query('DELETE FROM custom_fields WHERE id = $1', [field.id]);
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
 // ─── Note Field Values (all fields for a note) ───────────────────────────────
-app.get('/api/notes/:id/data', authMiddleware, (req, res) => {
-    const note = getOwnedNote(Number(req.params.id), req.userId);
-    if (!note) return res.status(404).json({ error: 'Note not found' });
-    const rows = db.prepare('SELECT field_key, value FROM note_field_values WHERE note_id = ?').all(note.id);
-    const data = {};
-    rows.forEach(r => { data[r.field_key] = r.value; });
-    res.json(data);
+app.get('/api/notes/:id/data', authMiddleware, async (req, res) => {
+    try {
+        const note = await getOwnedNote(Number(req.params.id), req.userId);
+        if (!note) return res.status(404).json({ error: 'Note not found' });
+        const { rows } = await pool.query('SELECT field_key, value FROM note_field_values WHERE note_id = $1', [note.id]);
+        const data = {};
+        rows.forEach(r => { data[r.field_key] = r.value; });
+        res.json(data);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-app.put('/api/notes/:id/data', authMiddleware, (req, res) => {
-    const note = getOwnedNote(Number(req.params.id), req.userId);
-    if (!note) return res.status(404).json({ error: 'Note not found' });
-    const data = req.body || {};
-    const upsert = db.prepare('INSERT INTO note_field_values (note_id, field_key, value) VALUES (?,?,?) ON CONFLICT(note_id, field_key) DO UPDATE SET value = excluded.value');
-    const del    = db.prepare('DELETE FROM note_field_values WHERE note_id = ? AND field_key = ?');
-    db.transaction(() => {
-        Object.entries(data).forEach(([key, val]) => {
-            if (val !== null && val !== undefined && val !== '') {
-                upsert.run(note.id, key, String(val));
-            } else {
-                del.run(note.id, key);
+app.put('/api/notes/:id/data', authMiddleware, async (req, res) => {
+    try {
+        const note = await getOwnedNote(Number(req.params.id), req.userId);
+        if (!note) return res.status(404).json({ error: 'Note not found' });
+        const data = req.body || {};
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            for (const [key, val] of Object.entries(data)) {
+                if (val !== null && val !== undefined && val !== '') {
+                    await client.query(
+                        'INSERT INTO note_field_values (note_id, field_key, value) VALUES ($1,$2,$3) ON CONFLICT (note_id, field_key) DO UPDATE SET value = EXCLUDED.value',
+                        [note.id, key, String(val)]
+                    );
+                } else {
+                    await client.query('DELETE FROM note_field_values WHERE note_id = $1 AND field_key = $2', [note.id, key]);
+                }
             }
-        });
-    })();
-    db.prepare('UPDATE info_notes SET updated_at = ? WHERE id = ?').run(now(), note.id);
-    res.json({ success: true });
+            await client.query('UPDATE info_notes SET updated_at = $1 WHERE id = $2', [now(), note.id]);
+            await client.query('COMMIT');
+        } catch (err) {
+            await client.query('ROLLBACK');
+            throw err;
+        } finally {
+            client.release();
+        }
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
 // ─── Universities (per note) ──────────────────────────────────────────────────
-app.get('/api/notes/:id/universities', authMiddleware, (req, res) => {
-    const note = getOwnedNote(Number(req.params.id), req.userId);
-    if (!note) return res.status(404).json({ error: 'Note not found' });
-    const rows = db.prepare('SELECT * FROM universities WHERE note_id = ? ORDER BY id ASC').all(note.id);
-    res.json(rows.map(r => ({ id: r.id, name: r.name, type: r.type, status: r.status, createdAt: r.created_at, updatedAt: r.updated_at })));
+app.get('/api/notes/:id/universities', authMiddleware, async (req, res) => {
+    try {
+        const note = await getOwnedNote(Number(req.params.id), req.userId);
+        if (!note) return res.status(404).json({ error: 'Note not found' });
+        const { rows } = await pool.query('SELECT * FROM universities WHERE note_id = $1 ORDER BY id ASC', [note.id]);
+        res.json(rows.map(r => ({ id: r.id, name: r.name, type: r.type, status: r.status, createdAt: r.created_at, updatedAt: r.updated_at })));
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-app.put('/api/notes/:id/universities', authMiddleware, (req, res) => {
-    const note = getOwnedNote(Number(req.params.id), req.userId);
-    if (!note) return res.status(404).json({ error: 'Note not found' });
-    const list = Array.isArray(req.body) ? req.body : [];
-    db.transaction(() => {
-        db.prepare('DELETE FROM universities WHERE note_id = ?').run(note.id);
-        const stmt = db.prepare('INSERT INTO universities (note_id, name, type, status, created_at, updated_at) VALUES (?,?,?,?,?,?)');
-        list.forEach(u => stmt.run(note.id, u.name, u.type || 'CI', u.status || 'Applied', u.createdAt || now(), u.updatedAt || now()));
-    })();
-    res.json({ success: true, count: list.length });
+app.put('/api/notes/:id/universities', authMiddleware, async (req, res) => {
+    try {
+        const note = await getOwnedNote(Number(req.params.id), req.userId);
+        if (!note) return res.status(404).json({ error: 'Note not found' });
+        const list = Array.isArray(req.body) ? req.body : [];
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            await client.query('DELETE FROM universities WHERE note_id = $1', [note.id]);
+            for (const u of list) {
+                await client.query(
+                    'INSERT INTO universities (note_id, name, type, status, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6)',
+                    [note.id, u.name, u.type || 'CI', u.status || 'Applied', u.createdAt || now(), u.updatedAt || now()]
+                );
+            }
+            await client.query('COMMIT');
+        } catch (err) {
+            await client.query('ROLLBACK');
+            throw err;
+        } finally {
+            client.release();
+        }
+        res.json({ success: true, count: list.length });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
 // ─── Reminders (per user) ────────────────────────────────────────────────────
-app.get('/api/reminders', authMiddleware, (req, res) => {
-    const rows = db.prepare('SELECT id, text, date FROM reminders WHERE user_id = ? ORDER BY id ASC').all(req.userId);
-    res.json(rows);
+app.get('/api/reminders', authMiddleware, async (req, res) => {
+    try {
+        const { rows } = await pool.query(
+            'SELECT id, text, date FROM reminders WHERE user_id = $1 ORDER BY id ASC', [req.userId]
+        );
+        res.json(rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-app.put('/api/reminders', authMiddleware, (req, res) => {
-    const list = Array.isArray(req.body) ? req.body : [];
-    db.transaction(() => {
-        db.prepare('DELETE FROM reminders WHERE user_id = ?').run(req.userId);
-        const stmt = db.prepare('INSERT INTO reminders (user_id, text, date) VALUES (?,?,?)');
-        list.forEach(r => stmt.run(req.userId, r.text, r.date));
-    })();
-    res.json({ success: true, count: list.length });
+app.put('/api/reminders', authMiddleware, async (req, res) => {
+    try {
+        const list = Array.isArray(req.body) ? req.body : [];
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            await client.query('DELETE FROM reminders WHERE user_id = $1', [req.userId]);
+            for (const r of list) {
+                await client.query('INSERT INTO reminders (user_id, text, date) VALUES ($1,$2,$3)', [req.userId, r.text, r.date]);
+            }
+            await client.query('COMMIT');
+        } catch (err) {
+            await client.query('ROLLBACK');
+            throw err;
+        } finally {
+            client.release();
+        }
+        res.json({ success: true, count: list.length });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
 // ─── Clear note data only ────────────────────────────────────────────────────
-app.delete('/api/notes/:id/clear', authMiddleware, (req, res) => {
-    const note = getOwnedNote(Number(req.params.id), req.userId);
-    if (!note) return res.status(404).json({ error: 'Note not found' });
-    db.transaction(() => {
-        db.prepare('DELETE FROM note_field_values WHERE note_id = ?').run(note.id);
-        db.prepare('DELETE FROM universities WHERE note_id = ?').run(note.id);
-    })();
-    res.json({ success: true });
+app.delete('/api/notes/:id/clear', authMiddleware, async (req, res) => {
+    try {
+        const note = await getOwnedNote(Number(req.params.id), req.userId);
+        if (!note) return res.status(404).json({ error: 'Note not found' });
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            await client.query('DELETE FROM note_field_values WHERE note_id = $1', [note.id]);
+            await client.query('DELETE FROM universities WHERE note_id = $1', [note.id]);
+            await client.query('COMMIT');
+        } catch (err) {
+            await client.query('ROLLBACK');
+            throw err;
+        } finally {
+            client.release();
+        }
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
 // ─── SPA fallback ─────────────────────────────────────────────────────────────
@@ -231,7 +383,12 @@ app.get('*', (_req, res) => {
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 if (require.main === module) {
-    app.listen(PORT, () => console.log(`Inforganizer running on http://0.0.0.0:${PORT}`));
+    init().then(() => {
+        app.listen(PORT, () => console.log(`Inforganizer running on http://0.0.0.0:${PORT}`));
+    }).catch(err => {
+        console.error('Database initialisation failed:', err);
+        process.exit(1);
+    });
 }
 
 module.exports = app;

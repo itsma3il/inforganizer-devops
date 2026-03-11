@@ -3,7 +3,12 @@
 # Ansible playbook — configure nodes and deploy Inforganizer on k3s
 #
 # Usage (run from project root after terraform apply):
+#   export POSTGRES_PASSWORD="a-strong-random-password"
+#   export JWT_SECRET="a-strong-random-secret"
 #   ansible-playbook -i ansible/inventory.ini ansible/install_k3s.yml
+#
+# Secrets can also be passed inline:
+#   POSTGRES_PASSWORD=xxx JWT_SECRET=xxx ansible-playbook ...
 ###############################################################################
 
 - name: Common setup for all nodes
@@ -31,6 +36,7 @@
           - ca-certificates
           - gnupg
           - lsb-release
+          - gettext-base    # provides envsubst — used to inject secrets into postgres.yaml
         state: present
 
     - name: Disable swap (required by Kubernetes)
@@ -109,23 +115,48 @@
   hosts: master
   become: true
 
+  vars:
+    # Read from the environment of the Ansible control node.
+    # Set POSTGRES_PASSWORD and JWT_SECRET before running this playbook.
+    postgres_password: "{{ lookup('env', 'POSTGRES_PASSWORD') }}"
+    jwt_secret:        "{{ lookup('env', 'JWT_SECRET') }}"
+
   tasks:
+    - name: Validate required secrets are set
+      assert:
+        that:
+          - postgres_password | length > 0
+          - jwt_secret | length > 0
+        fail_msg: >
+          POSTGRES_PASSWORD and JWT_SECRET must be set as environment variables
+          before running this playbook (e.g. export POSTGRES_PASSWORD=xxx).
+
     - name: Copy Kubernetes manifests to master
       copy:
         src: "{{ item }}"
         dest: /tmp/
       loop:
         - ../k8s/pvc.yaml
+        - ../k8s/postgres.yaml  
         - ../k8s/deployment.yaml
         - ../k8s/service.yaml
 
-    - name: Apply PVC
+    - name: Apply PVC (PostgreSQL storage)
       command: k3s kubectl apply -f /tmp/pvc.yaml
 
-    - name: Apply Deployment
+    - name: Apply PostgreSQL (Secret, Deployment, Service)
+      shell: envsubst < /tmp/postgres.yaml | k3s kubectl apply -f -
+      environment:
+        POSTGRES_PASSWORD: "{{ postgres_password }}"
+        JWT_SECRET:        "{{ jwt_secret }}"
+
+    - name: Wait for PostgreSQL to be ready
+      command: k3s kubectl rollout status deployment/postgres --timeout=120s
+
+    - name: Apply App Deployment
       command: k3s kubectl apply -f /tmp/deployment.yaml
 
-    - name: Apply Service
+    - name: Apply App Service
       command: k3s kubectl apply -f /tmp/service.yaml
 
     - name: Wait for deployment to be ready
