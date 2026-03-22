@@ -129,6 +129,18 @@ jobs:
           role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Get runner public IP
+        id: runner_ip
+        uses: haythem/public-ip@v1.3
+
+      - name: Allow runner IP on SSH (22)
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id "${{ secrets.AWS_SSH_SG_ID }}" \
+            --protocol tcp \
+            --port 22 \
+            --cidr "${{ steps.runner_ip.outputs.ipv4 }}/32" || true
+
       - name: Fetch ECR password
         id: ecr
         run: |
@@ -151,7 +163,6 @@ jobs:
           envs: ECR_PASSWORD,IMAGE_URI,IMAGE_TAG,ACCOUNT_ID,AWS_REGION
           script: |
             set -e
-
             sudo k3s kubectl create secret docker-registry ecr-creds \
               --docker-server="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" \
               --docker-username="AWS" \
@@ -163,3 +174,12 @@ jobs:
 
             sudo k3s kubectl rollout status deployment/inforganizer --timeout=300s
             sudo k3s kubectl get pods -l app=inforganizer -o wide
+
+      - name: Revoke runner IP from SSH (22)
+        if: always()
+        run: |
+          aws ec2 revoke-security-group-ingress \
+            --group-id "${{ secrets.AWS_SSH_SG_ID }}" \
+            --protocol tcp \
+            --port 22 \
+            --cidr "${{ steps.runner_ip.outputs.ipv4 }}/32" || true
