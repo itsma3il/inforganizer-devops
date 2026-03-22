@@ -35,7 +35,7 @@ spec:
         - name: ecr-creds
       initContainers:
         - name: wait-for-postgres
-          image: 883999922093.dkr.ecr.eu-west-3.amazonaws.com/inforganizer:sha-f6503359504b
+          image: postgres:16-alpine
           command:
             [
               "sh",
