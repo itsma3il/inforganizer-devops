@@ -102,8 +102,20 @@ jobs:
       - name: Set image URI and tag
         id: vars
         run: |
-          echo "image_tag=sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
-          echo "image_uri=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}" >> "$GITHUB_OUTPUT"
+          ACCOUNT_ID="${{ secrets.AWS_ACCOUNT_ID }}"
+          if [ -z "$ACCOUNT_ID" ]; then
+            echo "ERROR: AWS_ACCOUNT_ID secret is not set in GitHub Actions"
+            echo "Set it in: Settings -> Secrets and variables -> Actions -> New repository secret"
+            exit 1
+          fi
+
+          IMAGE_TAG="sha-${GITHUB_SHA::12}"
+          IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}"
+
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+
+          echo "Built image reference: ${IMAGE_URI}:${IMAGE_TAG}"
 
       - name: Build and push
         run: |
@@ -133,10 +145,39 @@ jobs:
         env:
           IMAGE_URI: ${{ needs.build-push-ecr.outputs.image_uri }}
           IMAGE_TAG: ${{ needs.build-push-ecr.outputs.image_tag }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         run: |
           set -e
-          sed -i "s|^\([[:space:]]*image:[[:space:]]*\).*|\1${IMAGE_URI}:${IMAGE_TAG}|" k8s/deployment.yaml
+
+          # Validate that IMAGE_URI is not empty and looks correct
+          if [ -z "$IMAGE_URI" ] || [ "$IMAGE_URI" = ".dkr.ecr.eu-west-3.amazonaws.com/inforganizer" ]; then
+            echo "ERROR: IMAGE_URI is malformed or AWS_ACCOUNT_ID secret not set"
+            echo "IMAGE_URI=$IMAGE_URI"
+            exit 1
+          fi
+
+          if [ -z "$IMAGE_TAG" ]; then
+            echo "ERROR: IMAGE_TAG is empty"
+            exit 1
+          fi
+
+          FULL_IMAGE="${IMAGE_URI}:${IMAGE_TAG}"
+          echo "Updating deployment.yaml with image: ${FULL_IMAGE}"
+
+          # Use a safer sed that only replaces specific image lines, not corrupting the file
+          sed -i.bak \
+            -e "s|image: .*dkr.ecr.*$|image: ${FULL_IMAGE}|" \
+            -e "s|image: :sha-.*$|image: ${FULL_IMAGE}|" \
+            k8s/deployment.yaml
+
+          echo "Updated deployment.yaml:"
           grep -n "image:" k8s/deployment.yaml
+
+          # Verify the image was updated correctly
+          if ! grep -q "${FULL_IMAGE}" k8s/deployment.yaml; then
+            echo "ERROR: Image tag was not updated correctly"
+            exit 1
+          fi
 
       - name: Commit and push manifest update
         env:
