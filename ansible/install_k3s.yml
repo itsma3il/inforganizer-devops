@@ -1,6 +1,5 @@
 ---
-###############################################################################
-# Ansible playbook — configure nodes and deploy Inforganizer on k3s
+# Ansible playbook — configure nodes, bootstrap k3s, and enable GitOps (ArgoCD)
 #
 # Usage (run from project root after terraform apply):
 #   export POSTGRES_PASSWORD="a-strong-random-password"
@@ -32,22 +31,49 @@
           - curl
           - wget
           - git
+          - awscli
           - apt-transport-https
           - ca-certificates
           - gnupg
           - lsb-release
-          - gettext-base # provides envsubst — used to inject secrets into postgres.yaml
         state: present
 
-    - name: Disable swap (required by Kubernetes)
-      command: swapoff -a
+    - name: Check if /swapfile exists
+      stat:
+        path: /swapfile
+      register: swapfile_stat
+
+    - name: Create 2GB swapfile
+      command: fallocate -l 2G /swapfile
+      when: not swapfile_stat.stat.exists
+
+    - name: Set swapfile permissions
+      file:
+        path: /swapfile
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Initialize swap area on new swapfile
+      command: mkswap /swapfile
+      when: not swapfile_stat.stat.exists
+
+    - name: Persist swapfile in fstab
+      mount:
+        name: none
+        src: /swapfile
+        fstype: swap
+        opts: sw
+        state: present
+
+    - name: Check active swap devices
+      command: swapon --show=NAME --noheadings
+      register: active_swaps
       changed_when: false
 
-    - name: Remove swap entry from /etc/fstab
-      lineinfile:
-        path: /etc/fstab
-        regexp: '^\s*[^#].*\sswap\s'
-        state: absent
+    - name: Enable swapfile
+      command: swapon /swapfile
+      when: active_swaps.stdout is not search('/swapfile')
 
     - name: Install Docker
       apt:
@@ -73,7 +99,7 @@
   tasks:
     - name: Install k3s server
       shell: |
-        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --disable traefik" sh -
+        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --disable traefik --kubelet-arg=fail-swap-on=false" sh -
       args:
         creates: /usr/local/bin/k3s
 
@@ -102,6 +128,7 @@
     - name: Install k3s agent and join cluster
       shell: |
         curl -sfL https://get.k3s.io | \
+          INSTALL_K3S_EXEC="agent --kubelet-arg=fail-swap-on=false" \
           K3S_URL=https://{{ hostvars[groups['master'][0]].master_ip | default(hostvars[groups['master'][0]].ansible_host | default(groups['master'][0])) }}:6443 \
           K3S_TOKEN={{ hostvars[groups['master'][0]].k3s_token }} \
           sh -
@@ -133,15 +160,18 @@
       register: result
       until: result.rc == 0
 
-- name: Deploy Inforganizer to Kubernetes
+- name: Bootstrap ArgoCD GitOps on Kubernetes
   hosts: master
   become: true
 
   vars:
     # Read from the environment of the Ansible control node.
-    # Set POSTGRES_PASSWORD and JWT_SECRET before running this playbook.
+    # These stay outside Git and are applied as a runtime K8s Secret.
     postgres_password: "{{ lookup('env', 'POSTGRES_PASSWORD') }}"
     jwt_secret: "{{ lookup('env', 'JWT_SECRET') }}"
+    ecr_account_id: "{{ lookup('env', 'AWS_ACCOUNT_ID') | default('883999922093', true) }}"
+    ecr_region: "eu-west-3"
+    ecr_registry: "{{ ecr_account_id }}.dkr.ecr.{{ ecr_region }}.amazonaws.com"
 
   tasks:
     - name: Validate required secrets are set
@@ -153,61 +183,102 @@
           POSTGRES_PASSWORD and JWT_SECRET must be set as environment variables
           before running this playbook (e.g. export POSTGRES_PASSWORD=xxx).
 
-    - name: Copy Kubernetes manifests to master
+    - name: Render runtime postgres secret manifest on master
+      template:
+        src: templates/postgres-secret.yaml.j2
+        dest: /tmp/postgres-secret.yaml
+        mode: "0600"
+
+    - name: Apply runtime postgres secret
+      command: k3s kubectl apply -f /tmp/postgres-secret.yaml
+      retries: 3
+      delay: 10
+      register: result
+      until: result.rc == 0
+
+    - name: Create or refresh ecr-creds secret
+      shell: |
+        set -e
+        ECR_PASSWORD="$(aws ecr get-login-password --region {{ ecr_region }})"
+        k3s kubectl create secret docker-registry ecr-creds \
+          --docker-server="{{ ecr_registry }}" \
+          --docker-username="AWS" \
+          --docker-password="${ECR_PASSWORD}" \
+          --dry-run=client -o yaml | k3s kubectl apply -f -
+      retries: 3
+      delay: 10
+      register: result
+      until: result.rc == 0
+
+    - name: Install ecr-creds refresh script on master
       copy:
-        src: "{{ item }}"
-        dest: /tmp/
-      loop:
-        - ../k8s/pvc.yaml
-        - ../k8s/postgres.yaml
-        - ../k8s/deployment.yaml
-        - ../k8s/service.yaml
+        dest: /usr/local/bin/refresh-ecr-creds.sh
+        mode: "0755"
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ECR_PASSWORD="$(aws ecr get-login-password --region {{ ecr_region }})"
+          k3s kubectl create secret docker-registry ecr-creds \
+            --docker-server="{{ ecr_registry }}" \
+            --docker-username="AWS" \
+            --docker-password="${ECR_PASSWORD}" \
+            --dry-run=client -o yaml | k3s kubectl apply -f -
 
-    - name: Apply PVC (PostgreSQL storage)
-      command: k3s kubectl apply -f /tmp/pvc.yaml
+    - name: Ensure periodic ecr-creds refresh cron is present
+      cron:
+        name: refresh ecr-creds secret for k3s
+        minute: "0"
+        hour: "*/6"
+        user: root
+        job: "/usr/local/bin/refresh-ecr-creds.sh >/var/log/refresh-ecr-creds.log 2>&1"
+
+    - name: Create argocd namespace
+      command: k3s kubectl create namespace argocd
+      register: create_argocd_ns
+      changed_when: create_argocd_ns.rc == 0
+      failed_when: create_argocd_ns.rc != 0 and 'AlreadyExists' not in create_argocd_ns.stderr
+
+    - name: Install ArgoCD components
+      command: >
+        k3s kubectl apply -n argocd 
+        --server-side 
+        --force-conflicts 
+        -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
       retries: 3
       delay: 10
       register: result
       until: result.rc == 0
 
-    - name: Apply PostgreSQL (Secret, Deployment, Service)
-      shell: envsubst < /tmp/postgres.yaml | k3s kubectl apply -f -
-      environment:
-        POSTGRES_PASSWORD: "{{ postgres_password }}"
-        JWT_SECRET: "{{ jwt_secret }}"
+    - name: Wait for ArgoCD server to be ready
+      command: k3s kubectl rollout status deployment/argocd-server -n argocd --timeout=300s
       retries: 3
-      delay: 10
-      register: result
-      until: result.rc == 0
-
-    - name: Wait for PostgreSQL to be ready
-      command: k3s kubectl rollout status deployment/postgres --timeout=120s
-      retries: 2
       delay: 15
       register: result
       until: result.rc == 0
 
-    - name: Apply App Deployment
-      command: k3s kubectl apply -f /tmp/deployment.yaml
+    - name: Copy ArgoCD application manifest to master
+      copy:
+        src: ../argocd/inforganizer-app.yaml
+        dest: /tmp/inforganizer-app.yaml
+
+    - name: Apply ArgoCD application
+      command: k3s kubectl apply -f /tmp/inforganizer-app.yaml
       retries: 3
       delay: 10
       register: result
       until: result.rc == 0
 
-    - name: Apply App Service
-      command: k3s kubectl apply -f /tmp/service.yaml
+    - name: Trigger initial ArgoCD sync by annotating app
+      command: >
+        k3s kubectl annotate application inforganizer -n argocd
+        argocd.argoproj.io/refresh=hard --overwrite
       retries: 3
       delay: 10
-      register: result
-      until: result.rc == 0
-
-    - name: Wait for deployment to be ready
-      command: k3s kubectl rollout status deployment/inforganizer --timeout=120s
-      retries: 2
-      delay: 15
       register: result
       until: result.rc == 0
 
     - name: Print app URL
       debug:
-        msg: "Inforganizer is accessible at http://{{ ansible_host | default(inventory_hostname) }}:30080"
+        msg: >
+          GitOps is active. ArgoCD will reconcile from GitHub and Inforganizer is exposed at
+          http://{{ ansible_host | default(inventory_hostname) }}:30080

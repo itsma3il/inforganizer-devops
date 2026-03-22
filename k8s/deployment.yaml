@@ -44,7 +44,7 @@ spec:
             ]
       containers:
         - name: inforganizer
-          image: ${AWS_ACCOUNT_ID}.dkr.ecr.eu-west-3.amazonaws.com/inforganizer:latest
+          image: 883999922093.dkr.ecr.eu-west-3.amazonaws.com/inforganizer:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 3000

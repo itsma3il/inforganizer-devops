@@ -1,21 +1,21 @@
 ###############################################################################
-# GitHub Actions CI/CD pipeline for Inforganizer
+# GitHub Actions CI + GitOps image update for Inforganizer
 #
 # Triggers: push to main, pull_request to main
 #
 # Jobs:
-#   1. test        — install deps & run API tests
-#   2. build-push  — build Docker image and push to AWS ECR  (main only)
-#   3. deploy      — invoke SSM Run Command on EC2 master for rollout  (main only)
+#   1. test           — install deps and run tests
+#   2. build-push-ecr — build image and push to AWS ECR (main only)
+#   3. gitops-update  — commit new image tag into k8s/deployment.yaml (main only)
 #
-# Required secrets (Settings → Secrets and variables → Actions):
-#   AWS_GITHUB_ROLE_ARN  — IAM role ARN assumed via GitHub OIDC
-#   AWS_ACCOUNT_ID       — AWS account ID (e.g., 883999922093)
-#   AWS_MASTER_INSTANCE_ID — EC2 instance ID for k3s master (e.g., i-0123456789abcdef0)
+# Required secrets (Settings -> Secrets and variables -> Actions):
+#   AWS_GITHUB_ROLE_ARN - IAM role ARN assumed via GitHub OIDC
+#   AWS_ACCOUNT_ID      - AWS account ID (example: 883999922093)
 #
-# GITHUB_TOKEN is provided automatically — no action needed.
+# Required repository settings:
+#   - Actions > Workflow permissions > Read and write permissions
 ###############################################################################
-name: CI/CD
+name: CI/CD (GitOps + ECR)
 
 on:
   push:
@@ -102,110 +102,54 @@ jobs:
       - name: Set image URI and tag
         id: vars
         run: |
-          echo "image_tag=latest" >> "$GITHUB_OUTPUT"
+          echo "image_tag=sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
           echo "image_uri=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         run: |
-          docker build -t "${{ steps.vars.outputs.image_uri }}:${{ steps.vars.outputs.image_tag }}" -t "${{ steps.vars.outputs.image_uri }}:latest" .
+          docker build \
+            -t "${{ steps.vars.outputs.image_uri }}:${{ steps.vars.outputs.image_tag }}" \
+            -t "${{ steps.vars.outputs.image_uri }}:latest" \
+            .
           docker push "${{ steps.vars.outputs.image_uri }}:${{ steps.vars.outputs.image_tag }}"
           docker push "${{ steps.vars.outputs.image_uri }}:latest"
 
-  deploy-k3s:
-    name: Deploy to k3s on AWS
+  gitops-update:
+    name: Update GitOps Manifest
     runs-on: ubuntu-latest
     needs: build-push-ecr
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     permissions:
-      id-token: write
-      contents: read
+      contents: write
 
     steps:
-      - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          fetch-depth: 0
 
-      - name: Fetch ECR password
-        id: ecr
-        run: |
-          ECR_PASSWORD="$(aws ecr get-login-password --region "${{ env.AWS_REGION }}")"
-          echo "password=${ECR_PASSWORD}" >> "$GITHUB_OUTPUT"
-
-      - name: Deploy via SSM Run Command
-        id: ssm
+      - name: Update deployment image tag
         env:
-          ECR_PASSWORD: ${{ steps.ecr.outputs.password }}
           IMAGE_URI: ${{ needs.build-push-ecr.outputs.image_uri }}
           IMAGE_TAG: ${{ needs.build-push-ecr.outputs.image_tag }}
-          ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-          AWS_REGION: ${{ env.AWS_REGION }}
         run: |
-          COMMAND_ID="$(aws ssm send-command \
-            --instance-ids "${{ secrets.AWS_MASTER_INSTANCE_ID }}" \
-            --document-name "AWS-RunShellScript" \
-            --comment "Deploy inforganizer image ${IMAGE_TAG}" \
-            --parameters commands="[
-              \"set -e\",
-              \"sudo k3s kubectl create secret docker-registry ecr-creds --docker-server='${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com' --docker-username='AWS' --docker-password='${ECR_PASSWORD}' --dry-run=client -o yaml | sudo k3s kubectl apply -f -\",
-              \"sudo k3s kubectl set image deployment/inforganizer inforganizer='${IMAGE_URI}:${IMAGE_TAG}'\",
-              \"sudo k3s kubectl rollout status deployment/inforganizer --timeout=300s\",
-              \"sudo k3s kubectl get pods -l app=inforganizer -o wide\"
-            ]" \
-            --query "Command.CommandId" \
-            --output text)"
+          set -e
+          sed -i "s|^\([[:space:]]*image:[[:space:]]*\).*|\1${IMAGE_URI}:${IMAGE_TAG}|" k8s/deployment.yaml
+          grep -n "image:" k8s/deployment.yaml
 
-          echo "command_id=${COMMAND_ID}" >> "$GITHUB_OUTPUT"
-
-      - name: Wait for SSM command result
+      - name: Commit and push manifest update
+        env:
+          IMAGE_TAG: ${{ needs.build-push-ecr.outputs.image_tag }}
         run: |
-          COMMAND_ID="${{ steps.ssm.outputs.command_id }}"
-          INSTANCE_ID="${{ secrets.AWS_MASTER_INSTANCE_ID }}"
+          set -e
+          if git diff --quiet -- k8s/deployment.yaml; then
+            echo "No manifest changes to commit"
+            exit 0
+          fi
 
-          for _ in $(seq 1 90); do
-            STATUS="$(aws ssm get-command-invocation \
-              --command-id "${COMMAND_ID}" \
-              --instance-id "${INSTANCE_ID}" \
-              --query "Status" \
-              --output text 2>/dev/null || true)"
-
-            case "${STATUS}" in
-              Success)
-                echo "SSM deployment succeeded"
-                aws ssm get-command-invocation \
-                  --command-id "${COMMAND_ID}" \
-                  --instance-id "${INSTANCE_ID}" \
-                  --query "StandardOutputContent" \
-                  --output text
-                exit 0
-                ;;
-              Failed|ExecutionTimedOut|TimedOut|Cancelled|Cancelling)
-                echo "SSM deployment failed with status: ${STATUS}"
-                echo "--- stdout ---"
-                aws ssm get-command-invocation \
-                  --command-id "${COMMAND_ID}" \
-                  --instance-id "${INSTANCE_ID}" \
-                  --query "StandardOutputContent" \
-                  --output text || true
-                echo "--- stderr ---"
-                aws ssm get-command-invocation \
-                  --command-id "${COMMAND_ID}" \
-                  --instance-id "${INSTANCE_ID}" \
-                  --query "StandardErrorContent" \
-                  --output text || true
-                exit 1
-                ;;
-              Pending|InProgress|Delayed|"")
-                sleep 5
-                ;;
-              *)
-                echo "Unexpected SSM status: ${STATUS}"
-                sleep 5
-                ;;
-            esac
-          done
-
-          echo "SSM deployment timed out waiting for completion"
-          exit 1
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add k8s/deployment.yaml
+          git commit -m "chore(gitops): update image tag to ${IMAGE_TAG} [skip ci]"
+          git push
