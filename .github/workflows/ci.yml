@@ -27,8 +27,6 @@ on:
 env:
   AWS_REGION: eu-west-3
   ECR_REPOSITORY: inforganizer
-  ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-  IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}
 
 jobs:
   test:
@@ -87,6 +85,7 @@ jobs:
 
     outputs:
       image_tag: ${{ steps.vars.outputs.image_tag }}
+      image_uri: ${{ steps.vars.outputs.image_uri }}
 
     steps:
       - name: Checkout
@@ -101,15 +100,17 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Set image tag
+      - name: Set image URI and tag
         id: vars
-        run: echo "image_tag=latest" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "image_tag=latest" >> "$GITHUB_OUTPUT"
+          echo "image_uri=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         run: |
-          docker build -t "${IMAGE_URI}:${{ steps.vars.outputs.image_tag }}" -t "${IMAGE_URI}:latest" .
-          docker push "${IMAGE_URI}:${{ steps.vars.outputs.image_tag }}"
-          docker push "${IMAGE_URI}:latest"
+          docker build -t "${{ steps.vars.outputs.image_uri }}:${{ steps.vars.outputs.image_tag }}" -t "${{ steps.vars.outputs.image_uri }}:latest" .
+          docker push "${{ steps.vars.outputs.image_uri }}:${{ steps.vars.outputs.image_tag }}"
+          docker push "${{ steps.vars.outputs.image_uri }}:latest"
 
   deploy-k3s:
     name: Deploy to k3s on AWS
@@ -121,9 +122,6 @@ jobs:
       id-token: write
       contents: read
 
-    env:
-      IMAGE_TAG: ${{ needs.build-push-ecr.outputs.image_tag }}
-
     steps:
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -134,16 +132,16 @@ jobs:
       - name: Fetch ECR password
         id: ecr
         run: |
-          ECR_PASSWORD="$(aws ecr get-login-password --region "${AWS_REGION}")"
+          ECR_PASSWORD="$(aws ecr get-login-password --region "${{ env.AWS_REGION }}")"
           echo "password=${ECR_PASSWORD}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.0.3
         env:
           ECR_PASSWORD: ${{ steps.ecr.outputs.password }}
-          IMAGE_URI: ${{ env.IMAGE_URI }}
-          IMAGE_TAG: ${{ env.IMAGE_TAG }}
-          ACCOUNT_ID: ${{ env.ACCOUNT_ID }}
+          IMAGE_URI: ${{ needs.build-push-ecr.outputs.image_uri }}
+          IMAGE_TAG: ${{ needs.build-push-ecr.outputs.image_tag }}
+          ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
           AWS_REGION: ${{ env.AWS_REGION }}
         with:
           host: ${{ secrets.AWS_MASTER_IP }}
