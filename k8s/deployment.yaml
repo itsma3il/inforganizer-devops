@@ -35,7 +35,7 @@ spec:
         - name: ecr-creds
       initContainers:
         - name: wait-for-postgres
-          image: postgres:16-alpine
+          image: :sha-f6503359504b
           command:
             [
               "sh",
@@ -44,7 +44,7 @@ spec:
             ]
       containers:
         - name: inforganizer
-          image: 883999922093.dkr.ecr.eu-west-3.amazonaws.com/inforganizer:latest
+          image: :sha-f6503359504b
           imagePullPolicy: Always
           ports:
             - containerPort: 3000
