@@ -5,14 +5,13 @@
 #
 # Jobs:
 #   1. test        — install deps & run API tests
-#   2. build-push  — build Docker image and push to ghcr.io  (main only)
-#   3. deploy      — SSH into EC2 master, pull new image & rollout  (main only)
+#   2. build-push  — build Docker image and push to AWS ECR  (main only)
+#   3. deploy      — invoke SSM Run Command on EC2 master for rollout  (main only)
 #
 # Required secrets (Settings → Secrets and variables → Actions):
-#   AWS_MASTER_IP     — Public IP of the EC2 master node (terraform output)
-#   SSH_PRIVATE_KEY   — PEM content of the EC2 key pair (~/.ssh/<key>.pem)
-#   POSTGRES_PASSWORD — Postgres password (used when re-applying the K8s secret)
-#   JWT_SECRET        — JWT signing secret (used when re-applying the K8s secret)
+#   AWS_GITHUB_ROLE_ARN  — IAM role ARN assumed via GitHub OIDC
+#   AWS_ACCOUNT_ID       — AWS account ID (e.g., 883999922093)
+#   AWS_MASTER_INSTANCE_ID — EC2 instance ID for k3s master (e.g., i-0123456789abcdef0)
 #
 # GITHUB_TOKEN is provided automatically — no action needed.
 ###############################################################################
@@ -129,57 +128,84 @@ jobs:
           role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Get runner public IP
-        id: runner_ip
-        uses: haythem/public-ip@v1.3
-
-      - name: Allow runner IP on SSH (22)
-        run: |
-          aws ec2 authorize-security-group-ingress \
-            --group-id "${{ secrets.AWS_SSH_SG_ID }}" \
-            --protocol tcp \
-            --port 22 \
-            --cidr "${{ steps.runner_ip.outputs.ipv4 }}/32" || true
-
       - name: Fetch ECR password
         id: ecr
         run: |
           ECR_PASSWORD="$(aws ecr get-login-password --region "${{ env.AWS_REGION }}")"
           echo "password=${ECR_PASSWORD}" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Deploy via SSM Run Command
+        id: ssm
         env:
           ECR_PASSWORD: ${{ steps.ecr.outputs.password }}
           IMAGE_URI: ${{ needs.build-push-ecr.outputs.image_uri }}
           IMAGE_TAG: ${{ needs.build-push-ecr.outputs.image_tag }}
           ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
           AWS_REGION: ${{ env.AWS_REGION }}
-        with:
-          host: ${{ secrets.AWS_MASTER_IP }}
-          username: ubuntu
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          timeout: 360s
-          envs: ECR_PASSWORD,IMAGE_URI,IMAGE_TAG,ACCOUNT_ID,AWS_REGION
-          script: |
-            set -e
-            sudo k3s kubectl create secret docker-registry ecr-creds \
-              --docker-server="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" \
-              --docker-username="AWS" \
-              --docker-password="${ECR_PASSWORD}" \
-              --dry-run=client -o yaml | sudo k3s kubectl apply -f -
-
-            sudo k3s kubectl set image deployment/inforganizer \
-              inforganizer="${IMAGE_URI}:${IMAGE_TAG}"
-
-            sudo k3s kubectl rollout status deployment/inforganizer --timeout=300s
-            sudo k3s kubectl get pods -l app=inforganizer -o wide
-
-      - name: Revoke runner IP from SSH (22)
-        if: always()
         run: |
-          aws ec2 revoke-security-group-ingress \
-            --group-id "${{ secrets.AWS_SSH_SG_ID }}" \
-            --protocol tcp \
-            --port 22 \
-            --cidr "${{ steps.runner_ip.outputs.ipv4 }}/32" || true
+          COMMAND_ID="$(aws ssm send-command \
+            --instance-ids "${{ secrets.AWS_MASTER_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy inforganizer image ${IMAGE_TAG}" \
+            --parameters commands="[
+              \"set -e\",
+              \"sudo k3s kubectl create secret docker-registry ecr-creds --docker-server='${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com' --docker-username='AWS' --docker-password='${ECR_PASSWORD}' --dry-run=client -o yaml | sudo k3s kubectl apply -f -\",
+              \"sudo k3s kubectl set image deployment/inforganizer inforganizer='${IMAGE_URI}:${IMAGE_TAG}'\",
+              \"sudo k3s kubectl rollout status deployment/inforganizer --timeout=300s\",
+              \"sudo k3s kubectl get pods -l app=inforganizer -o wide\"
+            ]" \
+            --query "Command.CommandId" \
+            --output text)"
+
+          echo "command_id=${COMMAND_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for SSM command result
+        run: |
+          COMMAND_ID="${{ steps.ssm.outputs.command_id }}"
+          INSTANCE_ID="${{ secrets.AWS_MASTER_INSTANCE_ID }}"
+
+          for _ in $(seq 1 90); do
+            STATUS="$(aws ssm get-command-invocation \
+              --command-id "${COMMAND_ID}" \
+              --instance-id "${INSTANCE_ID}" \
+              --query "Status" \
+              --output text 2>/dev/null || true)"
+
+            case "${STATUS}" in
+              Success)
+                echo "SSM deployment succeeded"
+                aws ssm get-command-invocation \
+                  --command-id "${COMMAND_ID}" \
+                  --instance-id "${INSTANCE_ID}" \
+                  --query "StandardOutputContent" \
+                  --output text
+                exit 0
+                ;;
+              Failed|ExecutionTimedOut|TimedOut|Cancelled|Cancelling)
+                echo "SSM deployment failed with status: ${STATUS}"
+                echo "--- stdout ---"
+                aws ssm get-command-invocation \
+                  --command-id "${COMMAND_ID}" \
+                  --instance-id "${INSTANCE_ID}" \
+                  --query "StandardOutputContent" \
+                  --output text || true
+                echo "--- stderr ---"
+                aws ssm get-command-invocation \
+                  --command-id "${COMMAND_ID}" \
+                  --instance-id "${INSTANCE_ID}" \
+                  --query "StandardErrorContent" \
+                  --output text || true
+                exit 1
+                ;;
+              Pending|InProgress|Delayed|"")
+                sleep 5
+                ;;
+              *)
+                echo "Unexpected SSM status: ${STATUS}"
+                sleep 5
+                ;;
+            esac
+          done
+
+          echo "SSM deployment timed out waiting for completion"
+          exit 1
