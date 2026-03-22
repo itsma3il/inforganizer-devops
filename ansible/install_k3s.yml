@@ -238,16 +238,33 @@
       changed_when: create_argocd_ns.rc == 0
       failed_when: create_argocd_ns.rc != 0 and 'AlreadyExists' not in create_argocd_ns.stderr
 
-    - name: Install ArgoCD components
-      command: >
-        k3s kubectl apply -n argocd 
-        --server-side 
-        --force-conflicts 
-        -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+    - name: Download ArgoCD install manifest on master
+      get_url:
+        url: https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+        dest: /tmp/argocd-install.yaml
+        mode: "0644"
       retries: 3
-      delay: 10
-      register: result
-      until: result.rc == 0
+      delay: 5
+      register: argocd_manifest_download
+      until: argocd_manifest_download is succeeded
+
+    - name: Install ArgoCD components with retry/fallback
+      block:
+        - name: Apply ArgoCD install manifest (client-side apply)
+          command: k3s kubectl apply --request-timeout=600s -f /tmp/argocd-install.yaml
+          retries: 5
+          delay: 20
+          register: argocd_apply_client
+          until: argocd_apply_client.rc == 0
+      rescue:
+        - name: Apply ArgoCD install manifest (server-side fallback)
+          command: >
+            k3s kubectl apply --server-side --force-conflicts
+            --request-timeout=600s -f /tmp/argocd-install.yaml
+          retries: 5
+          delay: 20
+          register: argocd_apply_server
+          until: argocd_apply_server.rc == 0
 
     - name: Wait for ArgoCD server to be ready
       command: k3s kubectl rollout status deployment/argocd-server -n argocd --timeout=300s

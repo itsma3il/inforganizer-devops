@@ -1,7 +1,7 @@
 ###############################################################################
 # Inforganizer — Terraform infrastructure
 #
-# Provisions two EC2 t3.micro instances (master + worker) on AWS Free Tier,
+# Provisions two EC2 c7i-flex.large instances (master + worker),
 # inside a dedicated VPC with a public subnet.
 #
 # Usage:
@@ -17,6 +17,10 @@ terraform {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 5.0"
+    }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.2"
     }
   }
 }
@@ -137,7 +141,7 @@ data "aws_ami" "ubuntu" {
 # ─── EC2 instances ────────────────────────────────────────────────────────────
 resource "aws_instance" "master" {
   ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "t3.micro"
+  instance_type          = "c7i-flex.large"
   key_name               = var.key_name
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.k8s.id]
@@ -152,7 +156,7 @@ resource "aws_instance" "master" {
 
 resource "aws_instance" "worker" {
   ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "t3.micro"
+  instance_type          = "c7i-flex.large"
   key_name               = var.key_name
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.k8s.id]
@@ -182,12 +186,27 @@ output "app_url" {
 }
 
 # ─── Ansible inventory (auto-generated) ───────────────────────────────────────
-resource "local_file" "ansible_inventory" {
-  content = templatefile("${path.module}/inventory.tmpl", {
+# local_file can fail with "Provider produced inconsistent final plan" when
+# instance public IPs become known during apply; this approach is stable.
+resource "null_resource" "ansible_inventory" {
+  triggers = {
     master_ip = aws_instance.master.public_ip
     worker_ip = aws_instance.worker.public_ip
     key_name  = var.key_name
-  })
-  filename        = "${path.module}/../ansible/inventory.ini"
-  file_permission = "0644"
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      cat > "${path.module}/../ansible/inventory.ini" <<'EOF'
+      [master]
+      ${self.triggers.master_ip} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/${self.triggers.key_name}.pem
+
+      [workers]
+      ${self.triggers.worker_ip} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/${self.triggers.key_name}.pem
+
+      [all:vars]
+      ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+      EOF
+    EOT
+  }
 }
