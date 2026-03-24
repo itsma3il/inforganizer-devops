@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Infrastructure DevOps - InfOrganizer</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/reset.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/reveal.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/theme/white.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/plugin/highlight/monokai.css">
+    <style>
+        :root {
+            --r-main-font: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            --r-heading-font: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            --r-main-color: #2c3e50;
+            --r-heading-color: #1a5276;
+            --r-link-color: #2980b9;
+        }
+        .reveal h1, .reveal h2, .reveal h3 {
+            text-transform: none;
+            font-weight: 600;
+        }
+        .reveal h1 { font-size: 2.2em; }
+        .reveal h2 { font-size: 1.6em; color: #1a5276; }
+        .reveal h3 { font-size: 1.2em; color: #2874a6; }
+        .reveal ul { text-align: left; }
+        .reveal li { margin-bottom: 0.5em; font-size: 0.85em; }
+        .reveal .subtitle { font-size: 0.7em; color: #566573; margin-top: 1em; }
+        .reveal .highlight { color: #e74c3c; font-weight: bold; }
+        .reveal .success { color: #27ae60; font-weight: bold; }
+        .reveal .info-box {
+            background: #eaf2f8;
+            border-left: 4px solid #2980b9;
+            padding: 15px;
+            margin: 20px 0;
+            text-align: left;
+            font-size: 0.8em;
+        }
+        .reveal .two-columns {
+            display: flex;
+            gap: 40px;
+        }
+        .reveal .two-columns > div {
+            flex: 1;
+        }
+        .reveal table {
+            font-size: 0.7em;
+            margin: 0 auto;
+        }
+        .reveal table th {
+            background: #2980b9;
+            color: white;
+            padding: 10px;
+        }
+        .reveal table td {
+            padding: 8px;
+            border: 1px solid #bdc3c7;
+        }
+        .reveal .tech-stack {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .reveal .tech-item {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 0.7em;
+            font-weight: bold;
+        }
+        .reveal .tech-item.aws { background: linear-gradient(135deg, #ff9900 0%, #ff6600 100%); }
+        .reveal .tech-item.k8s { background: linear-gradient(135deg, #326ce5 0%, #1e4db7 100%); }
+        .reveal .tech-item.docker { background: linear-gradient(135deg, #0db7ed 0%, #0a8bbf 100%); }
+        .reveal .tech-item.gitops { background: linear-gradient(135deg, #6b5b95 0%, #4a3f6b 100%); }
+        .reveal .metric {
+            font-size: 2em;
+            color: #27ae60;
+            font-weight: bold;
+        }
+        .reveal .metric-label {
+            font-size: 0.6em;
+            color: #7f8c8d;
+        }
+        .reveal .architecture-flow {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin: 20px 0;
+            font-size: 0.75em;
+        }
+        .reveal .flow-box {
+            background: #3498db;
+            color: white;
+            padding: 10px 15px;
+            border-radius: 5px;
+        }
+        .reveal .flow-arrow {
+            font-size: 1.5em;
+            color: #7f8c8d;
+        }
+        .footer {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.5em;
+            color: #95a5a6;
+        }
+    </style>
+</head>
+<body>
+    <div class="reveal">
+        <div class="slides">
+
+            <!-- Slide 1: Page de titre -->
+            <section>
+                <h1>Mise en Place d'une Infrastructure DevOps</h1>
+                <h3>avec CI/CD, Kubernetes et GitOps</h3>
+                <p class="subtitle">
+                    <strong>Projet : InfOrganizer</strong><br>
+                    Organisateur d'informations pour candidatures universitaires
+                </p>
+                <br>
+                <p style="font-size: 0.6em; color: #7f8c8d;">
+                    Master  - Intelligence Artificielle / Cloud Computing<br>
+                    Annee Universitaire 2025-2026
+                </p>
+            </section>
+
+            <!-- Slide 2: Contexte et Problematique -->
+            <section>
+                <h2>Contexte et Problematique</h2>
+                <div class="two-columns">
+                    <div>
+                        <h3>Defis actuels</h3>
+                        <ul>
+                            <li><span class="highlight">Erreurs humaines</span> lors des configurations manuelles</li>
+                            <li>Temps de deploiement longs (heures/jours)</li>
+                            <li>Absence de tracabilite des modifications</li>
+                            <li>Rollback complexe et risque</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h3>Question de recherche</h3>
+                        <div class="info-box">
+                            Comment concevoir une infrastructure permettant un deploiement <strong>automatise</strong>, <strong>reproductible</strong> et <strong>auditable</strong> ?
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Slide 3: Objectifs du projet -->
+            <section>
+                <h2>Objectifs du Projet</h2>
+                <table>
+                    <tr>
+                        <th>Priorite</th>
+                        <th>Objectif</th>
+                        <th>Critere de succes</th>
+                    </tr>
+                    <tr>
+                        <td>1</td>
+                        <td>Automatisation complete</td>
+                        <td><span class="success">Zero intervention manuelle</span></td>
+                    </tr>
+                    <tr>
+                        <td>2</td>
+                        <td>Reproductibilite</td>
+                        <td>Infrastructure recreable en &lt; 30 min</td>
+                    </tr>
+                    <tr>
+                        <td>3</td>
+                        <td>Securite</td>
+                        <td>Pas de credentials statiques</td>
+                    </tr>
+                    <tr>
+                        <td>4</td>
+                        <td>Haute disponibilite</td>
+                        <td>Zero downtime lors des deploiements</td>
+                    </tr>
+                    <tr>
+                        <td>5</td>
+                        <td>Tracabilite</td>
+                        <td>Audit trail complet via Git</td>
+                    </tr>
+                </table>
+            </section>
+
+            <!-- Slide 4: Architecture GitOps -->
+            <section>
+                <h2>Architecture GitOps</h2>
+                <div class="info-box">
+                    <strong>Paradigme GitOps :</strong> Git constitue la source de verite unique pour l'etat desire du systeme.
+                </div>
+                <h3>4 Principes fondamentaux</h3>
+                <ul>
+                    <li><strong>Declaratif</strong> : Description de l'etat desire, pas des etapes</li>
+                    <li><strong>Versionne</strong> : Historique complet dans Git</li>
+                    <li><strong>Tire automatiquement</strong> : Agent surveille et applique les changements</li>
+                    <li><strong>Reconciliation continue</strong> : Correction automatique des derives</li>
+                </ul>
+            </section>
+
+            <!-- Slide 5: Stack Technologique -->
+            <section>
+                <h2>Stack Technologique</h2>
+                <div class="tech-stack">
+                    <span class="tech-item aws">AWS (VPC, EC2, ECR)</span>
+                    <span class="tech-item">Terraform</span>
+                    <span class="tech-item">Ansible</span>
+                    <span class="tech-item docker">Docker</span>
+                    <span class="tech-item k8s">Kubernetes (k3s)</span>
+                    <span class="tech-item">GitHub Actions</span>
+                    <span class="tech-item gitops">ArgoCD</span>
+                </div>
+                <br>
+                <div class="two-columns" style="font-size: 0.75em;">
+                    <div>
+                        <h3>Infrastructure as Code</h3>
+                        <ul>
+                            <li><strong>Terraform</strong> : Provisionnement AWS</li>
+                            <li><strong>Ansible</strong> : Configuration k3s</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h3>Deploiement</h3>
+                        <ul>
+                            <li><strong>GitHub Actions</strong> : CI/CD + OIDC</li>
+                            <li><strong>ArgoCD</strong> : GitOps operator</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Slide 6: Pipeline CI/CD -->
+            <section>
+                <h2>Pipeline CI/CD</h2>
+                <div class="architecture-flow">
+                    <span class="flow-box">Commit</span>
+                    <span class="flow-arrow">→</span>
+                    <span class="flow-box">Tests</span>
+                    <span class="flow-arrow">→</span>
+                    <span class="flow-box">Build</span>
+                    <span class="flow-arrow">→</span>
+                    <span class="flow-box">Push ECR</span>
+                    <span class="flow-arrow">→</span>
+                    <span class="flow-box">GitOps Update</span>
+                    <span class="flow-arrow">→</span>
+                    <span class="flow-box">ArgoCD Sync</span>
+                </div>
+                <br>
+                <div class="two-columns" style="font-size: 0.7em;">
+                    <div>
+                        <h3>Securite OIDC</h3>
+                        <ul>
+                            <li>Token genere a chaque execution</li>
+                            <li>Expire apres 1 heure max</li>
+                            <li>Lie au repository et branche</li>
+                            <li><span class="success">Zero credentials statiques</span></li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h3>Avantages</h3>
+                        <ul>
+                            <li>Echec rapide (fail fast)</li>
+                            <li>Tag SHA = immutabilite</li>
+                            <li>[skip ci] evite les boucles</li>
+                            <li>Self-healing ArgoCD</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Slide 7: Deploiement Kubernetes -->
+            <section>
+                <h2>Deploiement Kubernetes</h2>
+                <div class="two-columns" style="font-size: 0.75em;">
+                    <div>
+                        <h3>Haute Disponibilite</h3>
+                        <ul>
+                            <li><strong>2 replicas</strong> avec anti-affinite</li>
+                            <li><strong>RollingUpdate</strong> : maxUnavailable=0</li>
+                            <li><strong>Init container</strong> : attente PostgreSQL</li>
+                            <li><strong>Probes</strong> : Liveness + Readiness</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h3>Securite</h3>
+                        <ul>
+                            <li>Image Docker <strong>multi-stage</strong></li>
+                            <li>Utilisateur <strong>non-root</strong></li>
+                            <li>Secrets Kubernetes (non en clair)</li>
+                            <li>Image finale : <strong>49 Mo</strong></li>
+                        </ul>
+                    </div>
+                </div>
+                <br>
+                <div class="info-box">
+                    <strong>Self-healing :</strong> Si un operateur modifie manuellement un deployment, ArgoCD restaure l'etat Git en &lt; 3 secondes.
+                </div>
+            </section>
+
+            <!-- Slide 8: Resultats et Validation -->
+            <section>
+                <h2>Resultats et Validation</h2>
+                <div style="display: flex; justify-content: space-around; margin: 30px 0;">
+                    <div style="text-align: center;">
+                        <div class="metric">1:22</div>
+                        <div class="metric-label">Temps de deploiement<br>(commit → production)</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div class="metric">0</div>
+                        <div class="metric-label">Intervention manuelle<br>requise</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div class="metric">12/12</div>
+                        <div class="metric-label">Validations<br>reussies</div>
+                    </div>
+                </div>
+                <table style="font-size: 0.6em;">
+                    <tr>
+                        <th>Element</th>
+                        <th>Statut</th>
+                    </tr>
+                    <tr><td>Instances EC2 + Security Groups</td><td><span class="success">✓ OK</span></td></tr>
+                    <tr><td>Cluster k3s (2 noeuds Ready)</td><td><span class="success">✓ OK</span></td></tr>
+                    <tr><td>Pipeline CI/CD + OIDC</td><td><span class="success">✓ OK</span></td></tr>
+                    <tr><td>ArgoCD Synced/Healthy</td><td><span class="success">✓ OK</span></td></tr>
+                </table>
+            </section>
+
+            <!-- Slide 9: Discussion -->
+            <section>
+                <h2>Discussion</h2>
+                <div class="two-columns" style="font-size: 0.75em;">
+                    <div>
+                        <h3 style="color: #27ae60;">Points Forts</h3>
+                        <ul>
+                            <li>Automatisation complete atteinte</li>
+                            <li>Securite multicouche (OIDC, non-root)</li>
+                            <li>Zero downtime (RollingUpdate)</li>
+                            <li>Tracabilite via Git</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h3 style="color: #e74c3c;">Limites</h3>
+                        <ul>
+                            <li>SPOF : 1 seul master k3s</li>
+                            <li>Absence de monitoring</li>
+                            <li>Pas de rotation secrets</li>
+                            <li>Backup DB non automatise</li>
+                        </ul>
+                    </div>
+                </div>
+                <br>
+                <h3>Ameliorations Proposees</h3>
+                <div class="architecture-flow" style="font-size: 0.65em;">
+                    <span class="flow-box" style="background: #9b59b6;">Prometheus/Grafana</span>
+                    <span class="flow-box" style="background: #9b59b6;">Backup PostgreSQL</span>
+                    <span class="flow-box" style="background: #9b59b6;">k3s HA (3 masters)</span>
+                    <span class="flow-box" style="background: #9b59b6;">HashiCorp Vault</span>
+                </div>
+            </section>
+
+            <!-- Slide 10: Conclusion -->
+            <section>
+                <h2>Conclusion</h2>
+                <div class="info-box">
+                    Ce projet demontre qu'une infrastructure DevOps de <strong>niveau professionnel</strong> est accessible dans un contexte academique.
+                </div>
+                <h3>Realisations cles</h3>
+                <ul style="font-size: 0.8em;">
+                    <li><strong>Infrastructure as Code</strong> : Recreable en &lt; 30 minutes</li>
+                    <li><strong>GitOps</strong> : Git = source de verite unique</li>
+                    <li><strong>CI/CD securise</strong> : OIDC, zero credentials statiques</li>
+                    <li><strong>Deploiement continu</strong> : 1 min 22s du commit a la prod</li>
+                </ul>
+                <br>
+                <h3>Competences acquises</h3>
+                <div class="tech-stack" style="font-size: 0.6em;">
+                    <span class="tech-item">Terraform</span>
+                    <span class="tech-item">Ansible</span>
+                    <span class="tech-item k8s">Kubernetes</span>
+                    <span class="tech-item docker">Docker</span>
+                    <span class="tech-item gitops">GitOps</span>
+                    <span class="tech-item aws">AWS</span>
+                </div>
+                <br>
+                <p style="font-size: 0.7em; color: #7f8c8d; margin-top: 30px;">
+                    <strong>Merci de votre attention</strong><br>
+                    Questions ?
+                </p>
+            </section>
+
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/reveal.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/plugin/highlight/highlight.js"></script>
+    <script>
+        Reveal.initialize({
+            hash: true,
+            slideNumber: 'c/t',
+            showSlideNumber: 'all',
+            transition: 'slide',
+            transitionSpeed: 'default',
+            backgroundTransition: 'fade',
+            plugins: [ RevealHighlight ],
+            width: 1200,
+            height: 700,
+            margin: 0.1
+        });
+    </script>
+</body>
+</html>
